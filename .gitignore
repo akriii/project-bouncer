@@ -2,10 +2,10 @@
 # Environments & Secrets (CRITICAL)
 # ==========================================
 .env
-.env.*
-*.env
-*.pem
-*.key
+.env.
+.env
+.pem
+.key
 
 # ==========================================
 # Python & Backend (FastAPI)
