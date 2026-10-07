@@ -17,39 +17,14 @@ export default function WaitingRoom() {
   const connectToBouncer = async () => {
       try {
         let headers = {};
-        let token = null;
-
-        // ========================================================
-        // 🛠️ TESTING MODE: Active (Uses ?fast=true & dummy login)
-        // ========================================================
+        
+        // 1. Read token and dynamic return_to URL from the browser link
         const urlParams = new URLSearchParams(window.location.search);
-        const isTestingFast = urlParams.get("fast") === "true";
+        const handoffToken = urlParams.get("token");
+        const returnUrl = urlParams.get("return_to") || "http://localhost:8001/checkout";
 
-        if (isTestingFast) {
-          const loginRes = await fetch("http://localhost:8000/login", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ student_id: "test_user", password: "pwd" }),
-          });
-          
-          if (loginRes.ok) {
-            const loginData = await loginRes.json();
-            token = loginData.access_token;
-          }
-        }
-        // ========================================================
-
-
-        // ========================================================
-        // 🚀 PRODUCTION MODE: Commented out (Uses real saved JWT)
-        // ========================================================
-        // token = localStorage.getItem("student_access_token");
-        // ========================================================
-
-
-        // Attach the token (from whichever mode is active) to the request
-        if (token) {
-          headers["Authorization"] = `Bearer ${token}`;
+        if (handoffToken) {
+          headers["Authorization"] = `Bearer ${handoffToken}`;
         }
 
         const response = await fetch("http://localhost:8000/join", {
@@ -71,8 +46,11 @@ export default function WaitingRoom() {
             setPosition(wsData.position);
           } else if (wsData.status === "cleared") {
             setStatus("cleared");
-            setTicket(wsData.entry_ticket);
             ws.close();
+            
+            // 2. Redirect back dynamically to the caller site with the ticket
+            window.location.href = `${returnUrl}?bouncer_ticket=${wsData.entry_ticket}`;
+            
           } else if (wsData.status === "error") {
             setStatus("error");
             setErrorMessage(wsData.message);

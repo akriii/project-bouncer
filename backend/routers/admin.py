@@ -3,7 +3,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
 
 from core.config import SECRET_KEY, VALID_LANES
-from routers.waiting_room import active_websockets
+from routers.waiting_room import manager
 
 router = APIRouter(prefix="/admin")
 security = HTTPBearer()
@@ -22,7 +22,7 @@ async def get_admin_metrics(request: Request):
     return {
         "fast_lane_count": await redis.llen("fast_lane"),
         "auth_queue_count": await redis.llen("auth_queue"),
-        "active_sessions": len(active_websockets),
+        "active_sessions": len(manager.active_connections),
     }
 
 @router.post("/flush/{lane}", dependencies=[Depends(require_admin)])

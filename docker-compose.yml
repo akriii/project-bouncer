@@ -1,52 +1,36 @@
+version: '3.8'
+
 services:
   redis:
     image: redis:alpine
-    container_name: bouncer-redis
     ports:
       - "6379:6379"
-    networks:
-      - bouncer-net
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 1s
-      timeout: 3s
-      retries: 30
-    restart: unless-stopped
 
   backend:
     build: ./backend
-    container_name: bouncer-backend
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./backend:/app
+    # REMOVED: ports: ["8000:8000"] - Traffic must now go through Nginx
     environment:
       - REDIS_URL=redis://redis:6379
-    env_file:
-      - ./backend/.env
+      - SECRET_KEY=super_secret_jwt_key_bouncer_2026
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=secure_admin_password_2026
+    deploy:
+      replicas: 3 # Spins up Backend A, Backend B, and Backend C
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "8000:80" # Nginx takes over port 8000
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
-      redis:
-        condition: service_healthy
-    networks:
-      - bouncer-net
-    restart: unless-stopped
+      - backend
 
   frontend:
     build: ./frontend
-    container_name: bouncer-frontend
     ports:
       - "5173:5173"
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-    env_file:
-      - ./frontend/.env
+    environment:
+      - VITE_API_URL=http://localhost:8000
     depends_on:
       - backend
-    networks:
-      - bouncer-net
-    restart: unless-stopped
-
-networks:
-  bouncer-net:
-    driver: bridge

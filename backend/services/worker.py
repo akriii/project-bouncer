@@ -1,39 +1,40 @@
 import asyncio
-from datetime import datetime, timedelta, timezone
+import json
 import jwt
-from core.config import SECRET_KEY
+import time
+import os
 
-async def process_queue(redis, queue_name: str, target_rate_per_sec: float):
-    ticks_per_sec = 10
-    batch_size = max(1, int(target_rate_per_sec / ticks_per_sec))
-    interval = 1.0 / ticks_per_sec
+SHARED_SECRET_KEY = os.getenv("SECRET_KEY", "super_secret_jwt_key_bouncer_2026")
+
+# Accept the 3 arguments that main.py is passing
+async def process_queue(redis_client, queue_name: str, process_rate: float):
+    """Background task that clears the queue and broadcasts via Pub/Sub"""
+    
+    # Calculate how long to sleep based on the allowed rate
+    sleep_time = 1.0 / process_rate if process_rate > 0 else 1.0
 
     while True:
-        try:
-            session_ids = await redis.lpop(queue_name, batch_size)
+        # 1. Pop the next user from the dynamically named queue
+        next_user = await redis_client.lpop(queue_name)
+        
+        if next_user:
+            session_id = next_user
             
-            if session_ids:
-                if isinstance(session_ids, str):
-                    session_ids = [session_ids]
-
-                pipe = redis.pipeline()
-                now = datetime.now(timezone.utc)
-                exp = now + timedelta(minutes=3)
-
-                for session_id in session_ids:
-                    payload = {
-                        "sub": session_id,
-                        "type": "entry_ticket",
-                        "exp": exp,
-                    }
-                    ticket = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
-                    pipe.set(f"ticket:{session_id}", ticket, ex=180)
-
-                await pipe.execute()
-
-            await asyncio.sleep(interval)
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            print(f"Worker error in {queue_name}: {e}")
-            await asyncio.sleep(1)
+            # 2. Generate their Entry Ticket JWT
+            payload = {
+                "session_id": session_id,
+                "type": "entry_ticket",
+                "exp": time.time() + 300  # 5 minutes to use the ticket
+            }
+            entry_ticket = jwt.encode(payload, SHARED_SECRET_KEY, algorithm="HS256")
+            
+            # 3. THE BROADCAST: Shout the ticket to all 3 FastAPI containers
+            message = {
+                "session_id": session_id,
+                "status": "cleared",
+                "entry_ticket": entry_ticket
+            }
+            await redis_client.publish("bouncer_channel", json.dumps(message))
+            
+        # Control the flow rate
+        await asyncio.sleep(sleep_time)
