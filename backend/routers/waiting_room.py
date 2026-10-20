@@ -3,6 +3,8 @@ import json
 from contextlib import asynccontextmanager
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 import redis.asyncio as redis
+import logging
+logger = logging.getLogger("uvicorn.error")
 
 redis_client = redis.from_url("redis://redis:6379", decode_responses=True)
 
@@ -50,8 +52,24 @@ router = APIRouter(lifespan=router_lifespan)
 @router.websocket("/ws/waiting-room/{lane}/{session_id}")
 async def waiting_room_ws(websocket: WebSocket, lane: str, session_id: str):
     await manager.connect(session_id, websocket)
+    print(f"🔌 WEBSOCKET CONNECTED FOR: {session_id}", flush=True)
+    
     try:
+        missed_message = await redis_client.get(f"ticket:{session_id}")
+        
+        if missed_message:
+            print(f"📬 MAILBOX TICKET FOUND FOR: {session_id}. SENDING INSTANTLY!", flush=True)
+            if isinstance(missed_message, bytes):
+                missed_message = missed_message.decode('utf-8')
+            await websocket.send_text(missed_message)
+        else:
+            print(f"⏳ NO MAILBOX TICKET FOR {session_id}. WAITING ON LIVE BROADCAST...", flush=True)
+            
         while True:
             await websocket.receive_text()
+            
     except WebSocketDisconnect:
+        manager.disconnect(session_id)
+    except Exception as e:
+        print(f"❌ WEBSOCKET ERROR FOR {session_id}: {str(e)}", flush=True)
         manager.disconnect(session_id)
