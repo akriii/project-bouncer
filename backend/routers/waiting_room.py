@@ -1,13 +1,25 @@
 import asyncio
 import json
 from contextlib import asynccontextmanager
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request, Depends, HTTPException
 import redis.asyncio as redis
 import logging
+
+
 logger = logging.getLogger("uvicorn.error")
 
 redis_client = redis.from_url("redis://redis:6379", decode_responses=True)
 
+@asynccontextmanager
+async def router_lifespan(router: APIRouter):
+    # Startup: Create the background task
+    listener_task = asyncio.create_task(manager.listen_to_redis())
+    yield
+    # Shutdown: Cleanly cancel the task when the server stops
+    listener_task.cancel()
+
+# Pass the lifespan function when creating the router
+router = APIRouter(lifespan=router_lifespan)
 class ConnectionManager:
     def __init__(self):
         self.active_connections = {}
@@ -38,17 +50,6 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-@asynccontextmanager
-async def router_lifespan(router: APIRouter):
-    # Startup: Create the background task
-    listener_task = asyncio.create_task(manager.listen_to_redis())
-    yield
-    # Shutdown: Cleanly cancel the task when the server stops
-    listener_task.cancel()
-
-# Pass the lifespan function when creating the router
-router = APIRouter(lifespan=router_lifespan)
-
 @router.websocket("/ws/waiting-room/{lane}/{session_id}")
 async def waiting_room_ws(websocket: WebSocket, lane: str, session_id: str):
     await manager.connect(session_id, websocket)
@@ -73,3 +74,4 @@ async def waiting_room_ws(websocket: WebSocket, lane: str, session_id: str):
     except Exception as e:
         print(f"❌ WEBSOCKET ERROR FOR {session_id}: {str(e)}", flush=True)
         manager.disconnect(session_id)
+

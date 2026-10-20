@@ -11,3 +11,5 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 
 VALID_LANES = {"fast_lane", "auth_queue"}
 DEV_USERS = {"test_user": "pwd"}
+
+INTENT_SECRET_KEY = os.environ["INTENT_SECRET_KEY"]

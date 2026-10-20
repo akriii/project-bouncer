@@ -2,11 +2,12 @@ import uuid
 import secrets
 from datetime import datetime, timedelta, timezone
 import jwt
-from fastapi import APIRouter, Depends, Request, HTTPException
+from fastapi import APIRouter, Depends, Request, HTTPException, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-
+from core.config import SECRET_KEY, DEV_USERS, INTENT_SECRET_KEY
 from core.config import SECRET_KEY, DEV_USERS
+from middleware.bot_protection import BotProtection
 
 router = APIRouter()
 security = HTTPBearer(auto_error=False)
@@ -31,13 +32,42 @@ async def pre_warm_login(request: LoginRequest):
     }
     return {"access_token": jwt.encode(payload, SECRET_KEY, algorithm="HS256")}
 
+from middleware.bot_protection import BotProtection
+
 @router.post("/join")
 async def join_queue(
     request: Request,
+    x_intent_token: str = Header(None, alias="X-Intent-Token"),
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ):
-    session_id = str(uuid.uuid4())
     redis = request.app.state.redis
+
+    # 1. TIER 2: RUN ANTI-BOT WAF
+    bot_guard = BotProtection(redis_client=redis, max_requests=5, window_seconds=10)
+    await bot_guard.verify_request(request)
+
+    # 2. TIER 3: PRE-CART JWT INTENT VERIFICATION
+    if not x_intent_token:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing Pre-Cart Intent Token. Direct API access forbidden."
+        )
+
+    try:
+        intent_payload = jwt.decode(
+            x_intent_token, 
+            INTENT_SECRET_KEY, 
+            algorithms=["HS256"]
+        )
+        if intent_payload.get("type") != "pre_cart_intent":
+            raise HTTPException(status_code=403, detail="Invalid token type.")
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Pre-Cart Intent Token has expired.")
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=403, detail="Forged or corrupted Intent Token.")
+
+    # 3. QUEUE PLACEMENT
+    session_id = str(uuid.uuid4())
     lane = "auth_queue"
 
     if credentials:
@@ -49,8 +79,12 @@ async def join_queue(
             pass
 
     position = await redis.rpush(lane, session_id)
-    return {"session_id": session_id, "lane": lane, "initial_position": position}
-
+    return {
+        "session_id": session_id,
+        "lane": lane,
+        "initial_position": position,
+        "event_id": intent_payload.get("event_id")
+    }
 class AdminLoginRequest(BaseModel):
     username: str
     password: str
