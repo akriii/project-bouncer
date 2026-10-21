@@ -64,7 +64,7 @@ async def waiting_room_ws(websocket: WebSocket, lane: str, session_id: str):
                 missed_message = missed_message.decode('utf-8')
             await websocket.send_text(missed_message)
         else:
-            print(f"⏳ NO MAILBOX TICKET FOR {session_id}. WAITING ON LIVE BROADCAST...", flush=True)
+            print(f"NO MAILBOX TICKET FOR {session_id}. WAITING ON LIVE BROADCAST...", flush=True)
             
         while True:
             await websocket.receive_text()
@@ -72,6 +72,6 @@ async def waiting_room_ws(websocket: WebSocket, lane: str, session_id: str):
     except WebSocketDisconnect:
         manager.disconnect(session_id)
     except Exception as e:
-        print(f"❌ WEBSOCKET ERROR FOR {session_id}: {str(e)}", flush=True)
+        print(f"WEBSOCKET ERROR FOR {session_id}: {str(e)}", flush=True)
         manager.disconnect(session_id)
 

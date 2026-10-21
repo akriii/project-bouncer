@@ -7,7 +7,7 @@ import os
 SHARED_SECRET_KEY = os.getenv("SECRET_KEY", "super_secret_jwt_key_bouncer_2026")
 
 async def process_queue(redis_client, queue_name: str, process_rate: float):
-    print(f"🚀 WORKER STARTED for {queue_name} at {process_rate}/sec", flush=True)
+    print(f"WORKER STARTED for {queue_name} at {process_rate}/sec", flush=True)
     sleep_time = 1.0 / process_rate if process_rate > 0 else 1.0
 
     while True:
@@ -35,9 +35,9 @@ async def process_queue(redis_client, queue_name: str, process_rate: float):
                 await redis_client.setex(f"ticket:{session_id}", 60, message_json)
                 await redis_client.publish("bouncer_channel", message_json)
                 
-                print(f"📢 WORKER BROADCASTED TICKET FOR: {session_id}", flush=True)
+                print(f"WORKER BROADCASTED TICKET FOR: {session_id}", flush=True)
                 
         except Exception as e:
-            print(f"❌ WORKER ERROR: {str(e)}", flush=True)
+            print(f"WORKER ERROR: {str(e)}", flush=True)
             
         await asyncio.sleep(sleep_time)
