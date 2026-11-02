@@ -18,13 +18,26 @@ async def process_queue(redis_client, queue_name: str, process_rate: float):
                 session_id = next_user.decode("utf-8") if isinstance(next_user, bytes) else next_user
                 print(f"✅ WORKER POPPED USER: {session_id}", flush=True)
                 
+                # Fetch session details stored during /join
+                session_info = await redis_client.hgetall(f"session:{session_id}")
+                client_id = session_info.get("client_id", "default_client") if session_info else "default_client"
+
+                # Fetch tenant-specific secret if configured
+                client_config = await redis_client.hgetall(f"config:{client_id}")
+                client_secret = client_config.get("secret_key") or SHARED_SECRET_KEY
+
                 payload = {
                     "session_id": session_id,
+                    "client_id": client_id,
                     "type": "entry_ticket",
-                    "exp": time.time() + 300 
+                    "exp": int(time.time() + 300)
                 }
-                entry_ticket = jwt.encode(payload, SHARED_SECRET_KEY, algorithm="HS256")
+                if session_info and "event_id" in session_info:
+                    payload["event_id"] = session_info["event_id"]
+
+                entry_ticket = jwt.encode(payload, client_secret, algorithm="HS256")
                 
+                # Direct clearance message to the specific user
                 message = {
                     "session_id": session_id,
                     "status": "cleared",
@@ -34,6 +47,14 @@ async def process_queue(redis_client, queue_name: str, process_rate: float):
                 
                 await redis_client.setex(f"ticket:{session_id}", 60, message_json)
                 await redis_client.publish("bouncer_channel", message_json)
+                
+                # Broadcast progress update so waiting users can decrease their queue position
+                progress_broadcast = json.dumps({
+                    "type": "queue_progress",
+                    "lane": queue_name,
+                    "cleared_count": 1
+                })
+                await redis_client.publish("bouncer_channel", progress_broadcast)
                 
                 print(f"WORKER BROADCASTED TICKET FOR: {session_id}", flush=True)
                 

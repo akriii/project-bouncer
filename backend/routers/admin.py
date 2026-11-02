@@ -1,7 +1,8 @@
+import json
+import random
 from fastapi import APIRouter, Depends, Request, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
-import random
 
 from core.config import SECRET_KEY, VALID_LANES
 from routers.waiting_room import manager
@@ -14,16 +15,19 @@ async def require_admin(credentials: HTTPAuthorizationCredentials = Depends(secu
         payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=["HS256"])
         if payload.get("type") != "admin":
             raise HTTPException(status_code=403, detail="Forbidden: Admin privileges required")
+        return payload
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid or expired session")
 
 @router.get("/metrics", dependencies=[Depends(require_admin)])
 async def get_admin_metrics(request: Request):
     redis = request.app.state.redis
+    cluster_active = await redis.scard("bouncer_active_sessions")
+    local_active = len(manager.active_connections)
     return {
         "fast_lane_count": await redis.llen("fast_lane"),
         "auth_queue_count": await redis.llen("auth_queue"),
-        "active_sessions": len(manager.active_connections),
+        "active_sessions": cluster_active if cluster_active > 0 else local_active,
     }
 
 @router.post("/flush/{lane}", dependencies=[Depends(require_admin)])
@@ -33,7 +37,7 @@ async def flush_queue(lane: str, request: Request):
     await request.app.state.redis.delete(lane)
     return {"message": f"Successfully cleared {lane}"}
 
-@router.post("/admin/events/{event_id}/go-live")
+@router.post("/events/{event_id}/go-live")
 async def trigger_lottery_and_go_live(
     event_id: str,
     request: Request,
@@ -62,6 +66,12 @@ async def trigger_lottery_and_go_live(
     
     # 4. FLIP THE SWITCH: Future users bypass the lottery
     await redis.set(f"event_active:{event_id}", "true")
+    
+    # 5. Broadcast to WebSockets that event is live
+    await redis.publish("bouncer_channel", json.dumps({
+        "type": "event_live",
+        "event_id": event_id
+    }))
     
     return {
         "status": "success",

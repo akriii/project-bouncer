@@ -1,4 +1,5 @@
 import time
+import ipaddress
 from fastapi import Request, HTTPException, status
 import redis.asyncio as redis
 
@@ -13,6 +14,13 @@ BLOCKED_USER_AGENTS = [
     "headlesschrome",
     "puppeteer"
 ]
+
+def is_trusted_proxy(ip_str: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        return ip.is_loopback or ip.is_private
+    except ValueError:
+        return False
 
 class BotProtection:
     def __init__(self, redis_client: redis.Redis, max_requests: int = 5, window_seconds: int = 10):
@@ -37,19 +45,22 @@ class BotProtection:
                 detail="Invalid request context."
             )
 
-        # 2. IP Rate Limiting (Redis Sliding Window)
-        client_ip = request.client.host if request.client else "unknown"
-        # Respect Nginx real IP header if present
-        if "x-real-ip" in request.headers:
+        # 2. IP Resolution (Prevent header spoofing by untrusted direct clients)
+        raw_client_ip = request.client.host if request.client else "unknown"
+        if is_trusted_proxy(raw_client_ip) and "x-real-ip" in request.headers:
             client_ip = request.headers["x-real-ip"]
+        else:
+            client_ip = raw_client_ip
 
+        # 3. IP Rate Limiting (Atomic pipeline execution)
         current_time = int(time.time())
         key = f"rate_limit:{client_ip}:{current_time // self.window_seconds}"
 
-        # Increment count for current window
-        request_count = await self.redis.incr(key)
-        if request_count == 1:
-            await self.redis.expire(key, self.window_seconds)
+        pipeline = self.redis.pipeline()
+        pipeline.incr(key)
+        pipeline.expire(key, self.window_seconds * 2)
+        res = await pipeline.execute()
+        request_count = res[0]
 
         if request_count > self.max_requests:
             raise HTTPException(
