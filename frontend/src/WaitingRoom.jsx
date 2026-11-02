@@ -1,65 +1,138 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
+
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const WS_BASE = API_BASE.replace(/^http/, "ws");
 
 export default function WaitingRoom() {
   const [status, setStatus] = useState("joining"); 
   const [position, setPosition] = useState(0);
   const [lane, setLane] = useState("");
-  const [ticket, setTicket] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   
   const wsRef = useRef(null);
   const hasJoined = useRef(false); 
+  const validatedReturnUrlRef = useRef("http://localhost:8001/checkout");
+  const sessionInfoRef = useRef({ lane: "", sessionId: "" });
+  const reconnectAttemptsRef = useRef(0);
+  const establishWebSocketRef = useRef(null);
+
+  const establishWebSocket = useCallback((targetLane, sessionId) => {
+    if (wsRef.current) {
+      wsRef.current.close();
+    }
+
+    const wsUrl = `${WS_BASE}/ws/waiting-room/${targetLane}/${sessionId}`;
+    const ws = new WebSocket(wsUrl);
+    wsRef.current = ws;
+
+    ws.onmessage = (event) => {
+      try {
+        const wsData = JSON.parse(event.data);
+        if (wsData.status === "waiting") {
+          if (wsData.position !== undefined) {
+            setPosition(wsData.position);
+          } else if (wsData.progress) {
+            setPosition((prev) => {
+              if (typeof prev === "number") {
+                return Math.max(1, prev - wsData.progress);
+              }
+              return prev;
+            });
+          }
+        } else if (wsData.status === "cleared") {
+          setStatus("cleared");
+          ws.close();
+          
+          const targetUrl = validatedReturnUrlRef.current;
+          try {
+            const parsed = new URL(targetUrl);
+            if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+              parsed.searchParams.set("bouncer_ticket", wsData.entry_ticket);
+              window.location.href = parsed.toString();
+            } else {
+              setStatus("error");
+              setErrorMessage("Security error: Untrusted redirect protocol.");
+            }
+          } catch {
+            window.location.href = `${targetUrl}?bouncer_ticket=${wsData.entry_ticket}`;
+          }
+        } else if (wsData.status === "error") {
+          setStatus("error");
+          setErrorMessage(wsData.message || "An error occurred in waiting room.");
+          ws.close();
+        }
+      } catch (e) {
+        console.error("Failed to parse websocket message", e);
+      }
+    };
+
+    ws.onclose = () => {
+      // Reconnect if closed unexpectedly while still waiting
+      if (status !== "cleared" && reconnectAttemptsRef.current < 5) {
+        reconnectAttemptsRef.current += 1;
+        const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 8000);
+        setTimeout(() => {
+          if (sessionInfoRef.current.sessionId && establishWebSocketRef.current) {
+            establishWebSocketRef.current(sessionInfoRef.current.lane, sessionInfoRef.current.sessionId);
+          }
+        }, delay);
+      }
+    };
+
+    ws.onerror = () => {
+      // On error, let onclose handle reconnection
+    };
+  }, [status]);
+
+  useEffect(() => {
+    establishWebSocketRef.current = establishWebSocket;
+  }, [establishWebSocket]);
 
   useEffect(() => {
     if (hasJoined.current) return;
     hasJoined.current = true;
 
-  const connectToBouncer = async () => {
+    const connectToBouncer = async () => {
       try {
-        let headers = {};
-        
-        // 1. Read token and dynamic return_to URL from the browser link
+        const headers = { "Content-Type": "application/json" };
         const urlParams = new URLSearchParams(window.location.search);
         const handoffToken = urlParams.get("token");
-        const returnUrl = urlParams.get("return_to") || "http://localhost:8001/checkout";
+        const returnUrl = urlParams.get("return_to");
+        const clientId = urlParams.get("client_id") || "default_client";
 
         if (handoffToken) {
           headers["Authorization"] = `Bearer ${handoffToken}`;
         }
 
-        const response = await fetch("http://localhost:8000/join", {
+        const response = await fetch(`${API_BASE}/join`, {
           method: "POST",
           headers: headers,
+          body: JSON.stringify({
+            client_id: clientId,
+            return_to: returnUrl || undefined
+          })
         });
+
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          throw new Error(errData.detail || `Server returned ${response.status}`);
+        }
+
         const data = await response.json();
+
+        if (data.validated_return_to) {
+          validatedReturnUrlRef.current = data.validated_return_to;
+        }
 
         setLane(data.lane);
         setPosition(data.initial_position);
         setStatus("waiting"); 
         
-        const ws = new WebSocket(`ws://localhost:8000/ws/waiting-room/${data.lane}/${data.session_id}`);
-        wsRef.current = ws;
-
-        ws.onmessage = (event) => {
-          const wsData = JSON.parse(event.data);
-          if (wsData.status === "waiting") {
-            setPosition(wsData.position);
-          } else if (wsData.status === "cleared") {
-            setStatus("cleared");
-            ws.close();
-            
-            // 2. Redirect back dynamically to the caller site with the ticket
-            window.location.href = `${returnUrl}?bouncer_ticket=${wsData.entry_ticket}`;
-            
-          } else if (wsData.status === "error") {
-            setStatus("error");
-            setErrorMessage(wsData.message);
-            ws.close();
-          }
-        };
+        sessionInfoRef.current = { lane: data.lane, sessionId: data.session_id };
+        establishWebSocket(data.lane, data.session_id);
       } catch (err) {
         setStatus("error");
-        setErrorMessage("Failed to connect to Bouncer.");
+        setErrorMessage(err.message || "Failed to connect to Bouncer.");
       }
     };
 
@@ -68,13 +141,12 @@ export default function WaitingRoom() {
     return () => {
       if (wsRef.current) wsRef.current.close();
     };
-  }, []);
+  }, [establishWebSocket]);
 
   const getEstimatedTime = () => {
-    if (position === 0) return "Calculating...";
+    if (typeof position !== "number" || position === 0) return "Calculating...";
     
     const secondsPerUser = lane === "fast_lane" ? 0.02 : 0.05; 
-    
     const totalSeconds = position * secondsPerUser;
     
     if (totalSeconds < 60) return "Less than a minute";
@@ -99,12 +171,12 @@ export default function WaitingRoom() {
             
             {/* DYNAMIC TITLE & ICON */}
             <h1 className="text-3xl font-bold mb-1">
-              {lane === "fast_lane" ? "🚀 Fast Queue" : "⏳ Auth Queue"}
+              {lane === "fast_lane" ? "🚀 Fast Queue" : lane === "holding_pool" ? "🎟️ Holding Pool" : "⏳ Auth Queue"}
             </h1>
             
             {/* DYNAMIC SUBTITLE COLOR */}
-            <p className={`text-sm mb-8 font-semibold ${lane === 'fast_lane' ? 'text-emerald-400' : 'text-blue-400'}`}>
-              {lane === "fast_lane" ? "Priority Access Validated" : "Standard Access"}
+            <p className={`text-sm mb-8 font-semibold ${lane === "fast_lane" ? "text-emerald-400" : lane === "holding_pool" ? "text-amber-400" : "text-blue-400"}`}>
+              {lane === "fast_lane" ? "Priority Access Validated" : lane === "holding_pool" ? "Grand Shuffle Pending" : "Standard Access"}
             </p>
 
             <div className="bg-gray-950 rounded-xl p-6 border border-gray-800 mb-6 shadow-inner">
@@ -112,7 +184,7 @@ export default function WaitingRoom() {
                 People Ahead of You
               </div>
               <div className="text-6xl font-black text-white mb-6 tabular-nums tracking-tighter">
-                {position.toLocaleString()}
+                {typeof position === "number" ? position.toLocaleString() : position}
               </div>
 
               <div className="text-gray-500 text-xs uppercase tracking-widest font-semibold mb-1">
@@ -120,8 +192,8 @@ export default function WaitingRoom() {
               </div>
               
               {/* DYNAMIC ETA COLOR */}
-              <div className={`text-xl font-medium ${lane === 'fast_lane' ? 'text-emerald-400' : 'text-blue-400'}`}>
-                {getEstimatedTime()}
+              <div className={`text-xl font-medium ${lane === "fast_lane" ? "text-emerald-400" : lane === "holding_pool" ? "text-amber-400" : "text-blue-400"}`}>
+                {lane === "holding_pool" ? "Starting Soon" : getEstimatedTime()}
               </div>
             </div>
 

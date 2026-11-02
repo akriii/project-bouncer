@@ -1,5 +1,7 @@
 import { useState, useEffect } from "react";
 
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
 export default function AdminDashboard() {
   const [adminToken, setAdminToken] = useState(sessionStorage.getItem("adminToken"));
   
@@ -12,12 +14,13 @@ export default function AdminDashboard() {
   const [metrics, setMetrics] = useState({ fast_lane_count: 0, auth_queue_count: 0, active_sessions: 0 });
   const [loading, setLoading] = useState(true);
   const [actionMessage, setActionMessage] = useState("");
+  const [eventIdInput, setEventIdInput] = useState("");
 
   const handleLogin = async (e) => {
     e.preventDefault();
     setLoginError("");
     try {
-      const res = await fetch("http://localhost:8000/admin/login", {
+      const res = await fetch(`${API_BASE}/admin/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username, password }),
@@ -30,7 +33,7 @@ export default function AdminDashboard() {
       } else {
         setLoginError("Invalid credentials");
       }
-    } catch (err) {
+    } catch {
       setLoginError("Failed to connect to server");
     }
   };
@@ -45,7 +48,7 @@ export default function AdminDashboard() {
 
     const fetchMetrics = async () => {
       try {
-        const res = await fetch("http://localhost:8000/admin/metrics", {
+        const res = await fetch(`${API_BASE}/admin/metrics`, {
           headers: { "Authorization": `Bearer ${adminToken}` },
         });
         if (res.ok) {
@@ -55,7 +58,7 @@ export default function AdminDashboard() {
         } else if (res.status === 401 || res.status === 403) {
           logout(); 
         }
-      } catch (err) {
+      } catch {
         console.error("Failed to fetch metrics");
       }
     };
@@ -66,16 +69,14 @@ export default function AdminDashboard() {
   }, [adminToken]);
 
   const flushQueue = async (lane) => {
-    // 1. Double-confirm before doing anything
     const isConfirmed = window.confirm(
-      `⚠️ WARNING: Are you sure you want to flush the ${lane}?\n\nThis will NOT admit users. It will instantly kick all currently waiting users out of line and force them to restart.`
+      `⚠️ WARNING: Are you sure you want to flush the ${lane}?\n\nThis will NOT admit users. It will instantly kick all currently waiting users out of line.`
     );
     
-    if (!isConfirmed) return; // Exit if the admin clicks "Cancel"
+    if (!isConfirmed) return;
 
-    // 2. Proceed with the flush if they clicked "OK"
     try {
-      const res = await fetch(`http://localhost:8000/admin/flush/${lane}`, {
+      const res = await fetch(`${API_BASE}/admin/flush/${lane}`, {
         method: "POST",
         headers: { "Authorization": `Bearer ${adminToken}` },
       });
@@ -84,8 +85,30 @@ export default function AdminDashboard() {
         setActionMessage(data.message);
         setTimeout(() => setActionMessage(""), 3000);
       }
-    } catch (err) {
+    } catch {
       setActionMessage(`Failed to clear ${lane}`);
+    }
+  };
+
+  const triggerGoLive = async (e) => {
+    e.preventDefault();
+    if (!eventIdInput.trim()) return;
+
+    try {
+      const res = await fetch(`${API_BASE}/admin/events/${encodeURIComponent(eventIdInput.trim())}/go-live`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${adminToken}` },
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setActionMessage(`🚀 ${data.message} (${data.users_shuffled || 0} users shuffled)`);
+        setEventIdInput("");
+        setTimeout(() => setActionMessage(""), 4000);
+      } else {
+        setActionMessage(`Error: ${data.detail || "Failed to trigger drop"}`);
+      }
+    } catch {
+      setActionMessage("Network error triggering event drop.");
     }
   };
 
@@ -117,7 +140,7 @@ export default function AdminDashboard() {
         <div className="flex justify-between items-center mb-8 border-b border-gray-800 pb-4">
           <div>
             <h1 className="text-3xl font-bold tracking-tight">Bouncer Admin</h1>
-            <p className="text-gray-400 text-sm">Real-time throughput monitoring</p>
+            <p className="text-gray-400 text-sm">Real-time throughput & drop management</p>
           </div>
           <div className="flex items-center space-x-4">
             <div className="flex items-center space-x-2">
@@ -148,8 +171,32 @@ export default function AdminDashboard() {
           <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 shadow-xl">
             <div className="text-gray-400 text-xs uppercase tracking-widest font-semibold mb-2">🔌 Active Sessions</div>
             <div className="text-5xl font-black text-white mb-4 tabular-nums">{loading ? "..." : metrics.active_sessions}</div>
-            <div className="text-xs text-gray-500 py-2">Connected WebSockets</div>
+            <div className="text-xs text-gray-500 py-2">Connected WebSockets across cluster</div>
           </div>
+        </div>
+
+        {/* GRAND SHUFFLE / EVENT TRIGGER PANEL */}
+        <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 shadow-xl mb-8">
+          <h2 className="text-lg font-bold mb-2">🎰 Tier 3 Grand Shuffle (Go-Live Trigger)</h2>
+          <p className="text-gray-400 text-sm mb-4">
+            Scramble pre-drop waiting users in the Holding Pool and release them into the active queue simultaneously.
+          </p>
+          <form onSubmit={triggerGoLive} className="flex flex-col sm:flex-row gap-3">
+            <input
+              type="text"
+              placeholder="Event ID (e.g. drop_sneaker_2026)"
+              value={eventIdInput}
+              onChange={(e) => setEventIdInput(e.target.value)}
+              className="flex-1 bg-gray-950 border border-gray-800 text-white rounded-lg px-4 py-2.5 outline-none focus:border-emerald-500 transition text-sm"
+              required
+            />
+            <button
+              type="submit"
+              className="bg-emerald-600 hover:bg-emerald-500 text-white font-semibold px-6 py-2.5 rounded-lg transition text-sm shadow-lg shadow-emerald-900/20"
+            >
+              Trigger Grand Shuffle
+            </button>
+          </form>
         </div>
       </div>
     </div>

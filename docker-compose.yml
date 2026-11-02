@@ -14,6 +14,7 @@ services:
       - SECRET_KEY=super_secret_jwt_key_bouncer_2026
       - ADMIN_USERNAME=admin
       - ADMIN_PASSWORD=secure_admin_password_2026
+      - INTENT_SECRET_KEY=bouncer-shared-intent-secret-key-2026
     deploy:
       replicas: 3 # Spins up Backend A, Backend B, and Backend C
 

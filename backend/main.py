@@ -23,14 +23,19 @@ async def lifespan(app: FastAPI):
     else:
         raise RuntimeError("Could not connect to Redis after multiple attempts.")
 
+    # Wire shared Redis connection to WebSocket manager
+    waiting_room.manager.set_redis(app.state.redis)
+
     fast_task = asyncio.create_task(process_queue(app.state.redis, "fast_lane", 50.0))
     auth_task = asyncio.create_task(process_queue(app.state.redis, "auth_queue", 20.0))
+    listener_task = asyncio.create_task(waiting_room.manager.listen_to_redis())
 
     yield
 
+    listener_task.cancel()
     fast_task.cancel()
     auth_task.cancel()
-    await asyncio.gather(fast_task, auth_task, return_exceptions=True)
+    await asyncio.gather(fast_task, auth_task, listener_task, return_exceptions=True)
     await app.state.redis.aclose()
 
 
@@ -38,7 +43,8 @@ app = FastAPI(title="Project Bouncer", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:5174"],
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
+    allow_origins=["http://localhost:5173", "http://localhost:5174", "http://localhost:8001"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
