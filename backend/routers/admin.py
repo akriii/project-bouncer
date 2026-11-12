@@ -5,7 +5,9 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
 
 from core.config import SECRET_KEY, VALID_LANES
+from core.tiers import decode_hash, resolve_tiers
 from routers.waiting_room import manager
+from services.tickets import publish_entry_ticket
 
 router = APIRouter(prefix="/admin")
 security = HTTPBearer()
@@ -57,10 +59,23 @@ async def trigger_lottery_and_go_live(
 
     # 2. THE SHUFFLE (Scramble the list)
     random.shuffle(waiting_users)
-    
-    # 3. PIPELINE: Push shuffled users to the active queue and destroy the holding pool
+
+    # 3. Only clients who bought the waiting room enter the FIFO.
+    #    Everyone else is released in shuffled order with a ticket.
+    queued = []
+    direct = []
+    for session_id in waiting_users:
+        session = decode_hash(await redis.hgetall(f"session:{session_id}"))
+        client_id = session.get("client_id") or "default_client"
+        client_config = decode_hash(await redis.hgetall(f"config:{client_id}"))
+        if "tier1_queue" in resolve_tiers(client_id, client_config):
+            queued.append(session_id)
+        else:
+            direct.append(session_id)
+
     pipeline = redis.pipeline()
-    pipeline.rpush("auth_queue", *waiting_users)
+    if queued:
+        pipeline.rpush("auth_queue", *queued)
     pipeline.delete(pool_key)
     await pipeline.execute()
     
@@ -72,9 +87,14 @@ async def trigger_lottery_and_go_live(
         "type": "event_live",
         "event_id": event_id
     }))
-    
+
+    for session_id in direct:
+        await publish_entry_ticket(redis, session_id)
+
     return {
         "status": "success",
         "message": f"Event {event_id} is now LIVE.",
-        "users_shuffled": len(waiting_users)
+        "users_shuffled": len(waiting_users),
+        "users_queued": len(queued),
+        "users_released": len(direct),
     }

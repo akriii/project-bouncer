@@ -1,3 +1,4 @@
+import json
 import unittest
 import sys
 from pathlib import Path
@@ -9,6 +10,7 @@ backend_dir = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(backend_dir))
 
 from core.config import SECRET_KEY, INTENT_SECRET_KEY, ADMIN_USERNAME, ADMIN_PASSWORD
+from core.tiers import resolve_tiers
 from routers.auth import is_safe_return_url
 from middleware.bot_protection import BotProtection, is_trusted_proxy
 
@@ -184,6 +186,8 @@ class TestSecurityAndRoutes(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(res1.status_code, 200)
         self.assertEqual(res1.json()["lane"], "holding_pool")
+        self.assertEqual(res1.json()["tiers"], ["tier3_lottery"])
+        self.assertEqual(res1.json()["access"], "holding_pool")
 
         # Second request with SAME token (replay attack) fails with 403
         res2 = client.post(
@@ -237,6 +241,140 @@ class TestSecurityAndRoutes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(golive_res.status_code, 200)
         self.assertEqual(golive_res.json()["status"], "success")
         self.assertEqual(golive_res.json()["users_shuffled"], 2)
+        self.assertEqual(golive_res.json()["users_queued"], 2)
+        self.assertEqual(golive_res.json()["users_released"], 0)
+
+    def test_resolve_tiers_is_a_mix_not_a_ladder(self):
+        self.assertEqual(resolve_tiers("org", {"tier2_waf": "true"}), ["tier2_waf"])
+        self.assertEqual(resolve_tiers("org", {"tier3_lottery": "true"}), ["tier3_lottery"])
+        self.assertEqual(
+            resolve_tiers("org", {"tier1_queue": "true", "tier3_lottery": "true"}),
+            ["tier1_queue", "tier3_lottery"],
+        )
+        self.assertEqual(
+            resolve_tiers("org", {"tier1_queue": "true", "tier2_waf": "true", "tier3_lottery": "true"}),
+            ["tier1_queue", "tier2_waf", "tier3_lottery"],
+        )
+        self.assertEqual(resolve_tiers("default_client", {}), ["tier1_queue"])
+        self.assertEqual(resolve_tiers("default_client", {"tier2_waf": "true"}), ["tier2_waf"])
+        self.assertEqual(resolve_tiers("org", {"secret_key": "x"}), [])
+
+    async def test_join_follows_subscribed_tier_mix(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from routers import auth
+
+        app = FastAPI()
+        app.include_router(auth.router)
+
+        def make_redis(config):
+            mock_redis = AsyncMock()
+            mock_redis.rpush = AsyncMock(return_value=4)
+            mock_redis.hset = AsyncMock()
+            mock_redis.expire = AsyncMock()
+            mock_redis.setex = AsyncMock()
+            mock_redis.publish = AsyncMock()
+            mock_pipeline = MagicMock()
+            mock_pipeline.execute = AsyncMock(return_value=[1, True])
+            mock_redis.pipeline = MagicMock(return_value=mock_pipeline)
+
+            async def hgetall(key):
+                if str(key).startswith("session:"):
+                    return {"client_id": "org_mix", "lane": "direct", "return_to": "http://localhost:8001/checkout"}
+                return config
+
+            mock_redis.hgetall = AsyncMock(side_effect=hgetall)
+            return mock_redis
+
+        client_app = TestClient(app)
+
+        app.state.redis = make_redis({"tier1_queue": "true"})
+        queued = client_app.post("/join", json={
+            "client_id": "org_mix",
+            "return_to": "http://localhost:8001/checkout",
+        })
+        self.assertEqual(queued.status_code, 200)
+        self.assertEqual(queued.json()["access"], "queue")
+        self.assertEqual(queued.json()["lane"], "auth_queue")
+        self.assertEqual(queued.json()["tiers"], ["tier1_queue"])
+        app.state.redis.rpush.assert_awaited()
+
+        app.state.redis = make_redis({"tier2_waf": "true", "secret_key": "shield-secret"})
+        direct = client_app.post(
+            "/join",
+            json={"client_id": "org_mix", "return_to": "http://localhost:8001/checkout"},
+            headers={"User-Agent": "Mozilla/5.0", "Sec-Fetch-Mode": "cors"},
+        )
+        self.assertEqual(direct.status_code, 200)
+        self.assertEqual(direct.json()["access"], "direct")
+        self.assertEqual(direct.json()["tiers"], ["tier2_waf"])
+        self.assertNotIn("initial_position", direct.json())
+        ticket = jwt.decode(direct.json()["entry_ticket"], "shield-secret", algorithms=["HS256"])
+        self.assertEqual(ticket["type"], "entry_ticket")
+        self.assertEqual(ticket["client_id"], "org_mix")
+        app.state.redis.rpush.assert_not_called()
+
+        app.state.redis = make_redis({"secret_key": "only-a-secret"})
+        missing = client_app.post("/join", json={
+            "client_id": "org_mix",
+            "return_to": "http://localhost:8001/checkout",
+        })
+        self.assertEqual(missing.status_code, 403)
+        self.assertIn("no active subscription tiers", missing.json()["detail"])
+
+    async def test_go_live_queues_only_tier1_clients(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from routers import admin
+
+        app = FastAPI()
+        app.include_router(admin.router)
+        mock_redis = AsyncMock()
+        mock_redis.smembers = AsyncMock(return_value={"user-queue", "user-direct"})
+        mock_pipeline = MagicMock()
+        mock_pipeline.execute = AsyncMock(return_value=True)
+        mock_redis.pipeline = MagicMock(return_value=mock_pipeline)
+        mock_redis.publish = AsyncMock()
+        mock_redis.set = AsyncMock()
+        mock_redis.setex = AsyncMock()
+
+        sessions = {
+            "user-queue": {"client_id": "org_queue"},
+            "user-direct": {"client_id": "org_direct", "event_id": "drop_999"},
+        }
+        configs = {
+            "org_queue": {"tier1_queue": "true", "tier3_lottery": "true"},
+            "org_direct": {"tier3_lottery": "true", "secret_key": "direct-secret"},
+        }
+
+        async def hgetall(key):
+            key = str(key)
+            if key.startswith("session:"):
+                return sessions[key.split(":", 1)[1]]
+            if key.startswith("config:"):
+                return configs[key.split(":", 1)[1]]
+            return {}
+
+        mock_redis.hgetall = AsyncMock(side_effect=hgetall)
+        app.state.redis = mock_redis
+
+        admin_token = jwt.encode(
+            {"sub": "admin", "type": "admin", "exp": int(time.time()) + 3600},
+            SECRET_KEY,
+            algorithm="HS256",
+        )
+        client = TestClient(app)
+        res = client.post(
+            "/admin/events/drop_999/go-live",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["users_queued"], 1)
+        self.assertEqual(res.json()["users_released"], 1)
+        self.assertEqual(mock_pipeline.rpush.call_args[0], ("auth_queue", "user-queue"))
+        ticket_body = json.loads(mock_redis.setex.await_args.args[2])
+        ticket = jwt.decode(ticket_body["entry_ticket"], "direct-secret", algorithms=["HS256"])
+        self.assertEqual(ticket["client_id"], "org_direct")
 
 if __name__ == "__main__":
     unittest.main()

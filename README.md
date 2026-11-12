@@ -126,7 +126,7 @@ The stack initializes:
 ### 3. Tier 3 Holding Pool & Grand Shuffle
 1. Configure client drop in Redis:
    ```bash
-   hset config:org_drop tier3_lottery true secret_key my_tenant_secret
+   hset config:org_drop tier1_queue true tier3_lottery true secret_key my_tenant_secret
    ```
 2. Users join with an `X-Intent-Token` and enter the **Holding Pool (Pending Lottery)**.
 3. Open the **Admin Dashboard** at `http://localhost:5173/admin` and log in (`admin` / `secure_admin_password_2026`).
@@ -170,7 +170,7 @@ npm run build   # Production Vite bundle build
 - [x] **Phase 2:** Tier 2 Bot Shield (WAF, rate limiting, scraper filtering).
 - [x] **Phase 3:** Tier 3 Intent Tokens, Pre-drop Holding Pool & Grand Shuffle API.
 - [x] **Security Hardening:** Open Redirect whitelisting, tenant key isolation, and token replay defense.
-- [ ] **Phase 4:** Next.js App Router frontend migration with Supabase Auth.
+- [ ] **Phase 4:** Continue on the existing React + Vite app in `frontend/` (do not initialize a new frontend repository). Next UI work: client dashboard and marketing landing page, the `useBouncer` React SDK, and the God Mode split-screen demo (Phases 5–7).
 - [ ] **Phase 5:** Multi-tenant Client Dashboard (API key generation, event toggles, real-time analytics).
 - [ ] **Phase 6:** `useBouncer` React client SDK for zero-friction drop integration.
 - [ ] **Phase 7:** "God Mode" split-screen interactive demo for prospective clients.
