@@ -1,6 +1,6 @@
 # Current Progress
 
-This file is the single source of truth for Project Bouncer and the order of work. Bouncer is a multi-tenant B2B SaaS platform ("Waiting Room as a Service" / "Digital Dam") that sits in front of client websites during high-demand traffic spikes, protecting checkouts from crashing and neutralizing scalper bots.
+Make sure that every current execution and plan is always recorded here no matter whether its new, initial or updated. This file is the single source of truth for Project Bouncer and the order of work. Bouncer is a multi-tenant B2B SaaS platform ("Waiting Room as a Service" / "Digital Dam") that sits in front of client websites during high-demand traffic spikes, protecting checkouts from crashing and neutralizing scalper bots.
 
 ---
 
@@ -122,32 +122,34 @@ flowchart TD
   - FIFO lanes, WebSocket connection manager, ticket signing, workers, Tier 2 WAF, Tier 3 Pre-Cart Intent and Grand Shuffle.
   - React waiting room and initial operator page.
   - Independent tier resolution (`core/tiers.py` and `resolve_tiers`).
-  - Unit and route security tests passing (`backend/testing/test_security_and_routes.py`).
-- **Immediate Next Fixes & Implementation Tasks:**
-  1. **Partition Queues & Holding Pools per Client:**
-     - Replace global `auth_queue` and `fast_lane` with `queue:{client_id}:auth_queue` and `queue:{client_id}:fast_lane`.
-     - Key holding pools per client: `lottery_pool:{client_id}`.
-     - Key drop status per client: `event_active:{client_id}`.
-  2. **Move Flush Endpoint from Admin to Client:**
-     - Remove `POST /admin/flush/{lane}`.
-     - Add `POST /client/flush/{lane}` so store owners can flush only their own users.
-  3. **Update Admin Dashboard Endpoints:**
-     - Remove total `auth_queue` / `fast_lane` metrics from Admin.
-     - Create `GET /admin/clients` returning list of subscribed clients, tier mix, redirect URL, and drop status.
-     - Create `GET /admin/metrics` returning total subscribed clients, count of clients per tier, and active live drops.
-  4. **Client Drop Configuration API & Dashboard:**
-     - `GET /client/config` and `PUT /client/config` for `redirect_url`, `start_time`, `auto_start`, `process_rate`.
-     - `POST /client/go-live` for manual Grand Shuffle.
-     - Build `frontend/src/ClientDashboard.jsx`.
-  5. **Background Auto-Start Scheduler:**
-     - Asyncio task in backend checking scheduled start times for clients with `auto_start = true`.
+  - **[Step 1 Complete] Multi-Tenant Queue Isolation & Client API:**
+    - Queues partitioned per-client: `queue:{client_id}:auth_queue` and `queue:{client_id}:fast_lane`.
+    - Holding pools partitioned per-client: `lottery_pool:{client_id}` and `event_active:{client_id}`.
+    - Client API in `backend/routers/client.py`:
+      - `POST /client/login`: scoped JWT for store owners.
+      - `GET /client/config` & `PUT /client/config`: drop configuration (redirect URL, start time, auto start, process rate).
+      - `POST /client/go-live`: manual Grand Shuffle trigger.
+      - `POST /client/flush/{lane}`: emergency flush strictly scoped to own queue.
+      - `GET /client/metrics`: real-time drop metrics (holding pool, queue, rejected bots, admitted users).
+    - Admin router refactored (`backend/routers/admin.py`):
+      - Removed queue flush from operator.
+      - `GET /admin/metrics`: returns total clients, tier breakdown, active live drops, active sessions.
+      - `GET /admin/clients`: returns registered client list, tier mix, redirect URL, and drop status.
+    - Background auto-start scheduler in `backend/services/scheduler.py` checking scheduled drops every second.
+    - Multi-tenant queue dispatcher in `backend/services/worker.py`.
+    - **Tier 1 Pre-Auth Lifecycle & Window Bounds (1-120 Hours):**
+      - Merchants configure drop `start_time` and `pre_auth_window_hours` (1 to 120 hrs, max 5 days).
+      - `POST /login` accepts `client_id`, strictly rejects authentication attempts before window opens with 400.
+      - `fast_pass` tokens are cryptographically bound to `client_id`, preventing Store A tokens from granting fast-pass on Store B.
+      - Lifecycle stages dynamically computed: `Idle`, `Scheduled (Pre-Auth Closed)`, `Pre-Auth Open`, `Ready (Pending Go-Live)`, and `Live`.
+    - 18 unit and security tests passing (`backend/testing/test_security_and_routes.py`).
 
 ---
 
 ## 5. Order of Work
 
-1. **Step 1 (Now):** Per-client queue isolation, client-scoped flush, client drop config API, and updating admin endpoints to display client-level metrics instead of raw shopper queues.
-2. **Step 2:** Build the Client Dashboard (`/dashboard`) and update Admin Dashboard (`/admin`) on the existing React 19 + Vite app.
+1. **Step 1 (Done):** Per-client queue isolation, client-scoped flush, client drop config API, auto-start scheduler, and updating admin endpoints to display client-level metrics.
+2. **Step 2 (Now):** Build the Client Dashboard (`/dashboard`) and update Admin Dashboard (`/admin`) on the existing React 19 + Vite app.
 3. **Step 3:** Landing Page and marketing site explaining tiers and the Digital Dam.
 4. **Step 4:** Supabase (PostgreSQL) durable client records & Google OAuth login.
 5. **Step 5:** New Tiers implementation (Tier 4 Proof-of-Human, Tier 5 Dynamic Dam).

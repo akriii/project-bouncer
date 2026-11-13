@@ -1,16 +1,16 @@
-import json
-import random
+from typing import List
 from fastapi import APIRouter, Depends, Request, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
 
-from core.config import SECRET_KEY, VALID_LANES
+from core.config import SECRET_KEY
 from core.tiers import decode_hash, resolve_tiers
 from routers.waiting_room import manager
-from services.tickets import publish_entry_ticket
+from services.shuffle import execute_grand_shuffle
 
 router = APIRouter(prefix="/admin")
 security = HTTPBearer()
+
 
 async def require_admin(credentials: HTTPAuthorizationCredentials = Depends(security)):
     try:
@@ -21,80 +21,106 @@ async def require_admin(credentials: HTTPAuthorizationCredentials = Depends(secu
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid or expired session")
 
+
+async def get_all_client_ids(redis) -> List[str]:
+    raw_members = await redis.smembers("registered_clients")
+    client_ids = set()
+    for m in raw_members:
+        client_ids.add(m.decode("utf-8") if isinstance(m, bytes) else m)
+
+    # Fallback scanning if set not initialized
+    if not client_ids:
+        try:
+            async for k in redis.scan_iter("config:*"):
+                k_str = k.decode("utf-8") if isinstance(k, bytes) else k
+                cid = k_str.split("config:", 1)[1]
+                client_ids.add(cid)
+                await redis.sadd("registered_clients", cid)
+        except Exception:
+            pass
+
+    return sorted(list(client_ids))
+
+
 @router.get("/metrics", dependencies=[Depends(require_admin)])
 async def get_admin_metrics(request: Request):
     redis = request.app.state.redis
+    client_ids = await get_all_client_ids(redis)
+
+    tier_counts = {"tier1": 0, "tier2": 0, "tier3": 0}
+    active_live_drops = 0
+
+    for cid in client_ids:
+        raw_cfg = await redis.hgetall(f"config:{cid}")
+        cfg = decode_hash(raw_cfg)
+        tiers = resolve_tiers(cid, cfg)
+        if "tier1_queue" in tiers:
+            tier_counts["tier1"] += 1
+        if "tier2_waf" in tiers:
+            tier_counts["tier2"] += 1
+        if "tier3_lottery" in tiers:
+            tier_counts["tier3"] += 1
+
+        is_live = await redis.get(f"event_active:{cid}")
+        if is_live == "true":
+            active_live_drops += 1
+
     cluster_active = await redis.scard("bouncer_active_sessions")
     local_active = len(manager.active_connections)
+
     return {
-        "fast_lane_count": await redis.llen("fast_lane"),
-        "auth_queue_count": await redis.llen("auth_queue"),
+        "total_clients": len(client_ids),
+        "tier_counts": tier_counts,
+        "active_live_drops": active_live_drops,
         "active_sessions": cluster_active if cluster_active > 0 else local_active,
     }
 
-@router.post("/flush/{lane}", dependencies=[Depends(require_admin)])
-async def flush_queue(lane: str, request: Request):
-    if lane not in VALID_LANES:
-        raise HTTPException(status_code=400, detail="Invalid lane")
-    await request.app.state.redis.delete(lane)
-    return {"message": f"Successfully cleared {lane}"}
 
-@router.post("/events/{event_id}/go-live")
-async def trigger_lottery_and_go_live(
-    event_id: str,
-    request: Request,
-    admin_data: dict = Depends(require_admin)
-):
+@router.get("/clients", dependencies=[Depends(require_admin)])
+async def get_admin_clients(request: Request):
     redis = request.app.state.redis
-    pool_key = f"lottery_pool:{event_id}"
-    
-    # 1. Grab everyone from the holding pool
-    waiting_users = await redis.smembers(pool_key)
-    waiting_users = list(waiting_users)
-    
-    if not waiting_users:
-        # If the pool is empty, just mark the event live
-        await redis.set(f"event_active:{event_id}", "true")
-        return {"status": "success", "message": f"Event {event_id} is live (0 users in pool)."}
+    client_ids = await get_all_client_ids(redis)
+    clients_list = []
 
-    # 2. THE SHUFFLE (Scramble the list)
-    random.shuffle(waiting_users)
+    for cid in client_ids:
+        raw_cfg = await redis.hgetall(f"config:{cid}")
+        cfg = decode_hash(raw_cfg)
+        tiers = resolve_tiers(cid, cfg)
+        is_live = (await redis.get(f"event_active:{cid}")) == "true"
+        start_time = cfg.get("start_time", "")
 
-    # 3. Only clients who bought the waiting room enter the FIFO.
-    #    Everyone else is released in shuffled order with a ticket.
-    queued = []
-    direct = []
-    for session_id in waiting_users:
-        session = decode_hash(await redis.hgetall(f"session:{session_id}"))
-        client_id = session.get("client_id") or "default_client"
-        client_config = decode_hash(await redis.hgetall(f"config:{client_id}"))
-        if "tier1_queue" in resolve_tiers(client_id, client_config):
-            queued.append(session_id)
+        if is_live:
+            drop_status = "Live"
+        elif start_time:
+            drop_status = "Scheduled"
         else:
-            direct.append(session_id)
+            drop_status = "Idle"
 
-    pipeline = redis.pipeline()
-    if queued:
-        pipeline.rpush("auth_queue", *queued)
-    pipeline.delete(pool_key)
-    await pipeline.execute()
-    
-    # 4. FLIP THE SWITCH: Future users bypass the lottery
-    await redis.set(f"event_active:{event_id}", "true")
-    
-    # 5. Broadcast to WebSockets that event is live
-    await redis.publish("bouncer_channel", json.dumps({
-        "type": "event_live",
-        "event_id": event_id
-    }))
+        active_users = await redis.scard(f"bouncer_active_sessions:{cid}")
+        auth_count = await redis.llen(f"queue:{cid}:auth_queue")
+        fast_count = await redis.llen(f"queue:{cid}:fast_lane")
+        pool_count = await redis.scard(f"lottery_pool:{cid}")
 
-    for session_id in direct:
-        await publish_entry_ticket(redis, session_id)
+        clients_list.append({
+            "client_id": cid,
+            "redirect_url": cfg.get("redirect_url", ""),
+            "tiers": tiers,
+            "drop_status": drop_status,
+            "start_time": start_time,
+            "auto_start": cfg.get("auto_start", "false").lower() == "true",
+            "active_users": active_users,
+            "queue_count": auth_count + fast_count,
+            "holding_pool_count": pool_count,
+        })
 
-    return {
-        "status": "success",
-        "message": f"Event {event_id} is now LIVE.",
-        "users_shuffled": len(waiting_users),
-        "users_queued": len(queued),
-        "users_released": len(direct),
-    }
+    return {"clients": clients_list}
+
+
+@router.post("/clients/{client_id}/go-live", dependencies=[Depends(require_admin)])
+async def trigger_client_go_live_admin(client_id: str, request: Request):
+    return await execute_grand_shuffle(request.app.state.redis, client_id)
+
+
+@router.post("/events/{event_id}/go-live", dependencies=[Depends(require_admin)])
+async def trigger_event_go_live_admin(event_id: str, request: Request):
+    return await execute_grand_shuffle(request.app.state.redis, event_id, event_id=event_id)

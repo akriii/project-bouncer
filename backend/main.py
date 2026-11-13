@@ -5,8 +5,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from core.config import REDIS_URL
-from services.worker import process_queue
-from routers import auth, waiting_room, admin
+from services.worker import run_multi_tenant_dispatcher
+from services.scheduler import run_auto_start_scheduler
+from routers import auth, waiting_room, admin, client
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -26,16 +28,16 @@ async def lifespan(app: FastAPI):
     # Wire shared Redis connection to WebSocket manager
     waiting_room.manager.set_redis(app.state.redis)
 
-    fast_task = asyncio.create_task(process_queue(app.state.redis, "fast_lane", 50.0))
-    auth_task = asyncio.create_task(process_queue(app.state.redis, "auth_queue", 20.0))
+    dispatcher_task = asyncio.create_task(run_multi_tenant_dispatcher(app.state.redis))
+    scheduler_task = asyncio.create_task(run_auto_start_scheduler(app.state.redis))
     listener_task = asyncio.create_task(waiting_room.manager.listen_to_redis())
 
     yield
 
     listener_task.cancel()
-    fast_task.cancel()
-    auth_task.cancel()
-    await asyncio.gather(fast_task, auth_task, listener_task, return_exceptions=True)
+    dispatcher_task.cancel()
+    scheduler_task.cancel()
+    await asyncio.gather(dispatcher_task, scheduler_task, listener_task, return_exceptions=True)
     await app.state.redis.aclose()
 
 
@@ -54,3 +56,4 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(waiting_room.router)
 app.include_router(admin.router)
+app.include_router(client.router)

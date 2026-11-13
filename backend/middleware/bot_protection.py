@@ -1,3 +1,4 @@
+from typing import Optional
 import time
 import ipaddress
 from fastapi import Request, HTTPException, status
@@ -28,10 +29,15 @@ class BotProtection:
         self.max_requests = max_requests
         self.window_seconds = window_seconds
 
-    async def verify_request(self, request: Request):
+    async def verify_request(self, request: Request, client_id: Optional[str] = None):
         # 1. Header Validation (Scraper Check)
         user_agent = request.headers.get("user-agent", "").lower()
         if not user_agent or any(bot in user_agent for bot in BLOCKED_USER_AGENTS):
+            if client_id:
+                try:
+                    await self.redis.incr(f"metrics:{client_id}:rejected_bots")
+                except Exception:
+                    pass
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Bot signature detected. Access denied."
@@ -40,6 +46,11 @@ class BotProtection:
         # Ensure request originates from a real browser context
         sec_fetch_mode = request.headers.get("sec-fetch-mode")
         if sec_fetch_mode and sec_fetch_mode not in ["navigate", "cors", "same-origin"]:
+            if client_id:
+                try:
+                    await self.redis.incr(f"metrics:{client_id}:rejected_bots")
+                except Exception:
+                    pass
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Invalid request context."
@@ -63,6 +74,11 @@ class BotProtection:
         request_count = res[0]
 
         if request_count > self.max_requests:
+            if client_id:
+                try:
+                    await self.redis.incr(f"metrics:{client_id}:rejected_bots")
+                except Exception:
+                    pass
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Too many request attempts. Scalper rate-limit triggered."

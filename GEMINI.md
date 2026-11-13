@@ -49,3 +49,4 @@ Bouncer operates as a true multi-tenant platform.
 *   **Phase 5:** Build the Client Dashboard (managing keys, event toggles, and metrics) and the Marketing Landing Page.
 *   **Phase 6:** Build the `useBouncer` React SDK for easy client integration.
 *   **Phase 7:** Set up the "God Mode" split-screen demo to showcase the real-time shuffle to prospective clients.
+
