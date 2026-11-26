@@ -16,6 +16,23 @@ export default function WaitingRoom() {
   const reconnectAttemptsRef = useRef(0);
   const establishWebSocketRef = useRef(null);
 
+  const redirectWithTicket = useCallback((ticket) => {
+    setStatus("cleared");
+    const targetUrl = validatedReturnUrlRef.current;
+    try {
+      const parsed = new URL(targetUrl);
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+        parsed.searchParams.set("bouncer_ticket", ticket);
+        window.location.href = parsed.toString();
+      } else {
+        setStatus("error");
+        setErrorMessage("Security error: Untrusted redirect protocol.");
+      }
+    } catch {
+      window.location.href = `${targetUrl}?bouncer_ticket=${ticket}`;
+    }
+  }, []);
+
   const establishWebSocket = useCallback((targetLane, sessionId) => {
     if (wsRef.current) {
       wsRef.current.close();
@@ -40,22 +57,8 @@ export default function WaitingRoom() {
             });
           }
         } else if (wsData.status === "cleared") {
-          setStatus("cleared");
           ws.close();
-          
-          const targetUrl = validatedReturnUrlRef.current;
-          try {
-            const parsed = new URL(targetUrl);
-            if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-              parsed.searchParams.set("bouncer_ticket", wsData.entry_ticket);
-              window.location.href = parsed.toString();
-            } else {
-              setStatus("error");
-              setErrorMessage("Security error: Untrusted redirect protocol.");
-            }
-          } catch {
-            window.location.href = `${targetUrl}?bouncer_ticket=${wsData.entry_ticket}`;
-          }
+          redirectWithTicket(wsData.entry_ticket);
         } else if (wsData.status === "error") {
           setStatus("error");
           setErrorMessage(wsData.message || "An error occurred in waiting room.");
@@ -82,7 +85,7 @@ export default function WaitingRoom() {
     ws.onerror = () => {
       // On error, let onclose handle reconnection
     };
-  }, [status]);
+  }, [status, redirectWithTicket]);
 
   useEffect(() => {
     establishWebSocketRef.current = establishWebSocket;
@@ -124,6 +127,11 @@ export default function WaitingRoom() {
           validatedReturnUrlRef.current = data.validated_return_to;
         }
 
+        if (data.entry_ticket) {
+          redirectWithTicket(data.entry_ticket);
+          return;
+        }
+
         setLane(data.lane);
         setPosition(data.initial_position);
         setStatus("waiting"); 
@@ -141,7 +149,7 @@ export default function WaitingRoom() {
     return () => {
       if (wsRef.current) wsRef.current.close();
     };
-  }, [establishWebSocket]);
+  }, [establishWebSocket, redirectWithTicket]);
 
   const getEstimatedTime = () => {
     if (typeof position !== "number" || position === 0) return "Calculating...";

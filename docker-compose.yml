@@ -8,15 +8,12 @@ services:
 
   backend:
     build: ./backend
-    # REMOVED: ports: ["8000:8000"] - Traffic must now go through Nginx
+    env_file:
+      - ./backend/.env
     environment:
       - REDIS_URL=redis://redis:6379
-      - SECRET_KEY=super_secret_jwt_key_bouncer_2026
-      - ADMIN_USERNAME=admin
-      - ADMIN_PASSWORD=secure_admin_password_2026
-      - INTENT_SECRET_KEY=bouncer-shared-intent-secret-key-2026
     deploy:
-      replicas: 3 # Spins up Backend A, Backend B, and Backend C
+      replicas: 3
 
   nginx:
     image: nginx:alpine
@@ -30,7 +27,7 @@ services:
   frontend:
     build: ./frontend
     ports:
-      - "5173:5173"
+      - "5174:5174"
     environment:
       - VITE_API_URL=http://localhost:8000
     depends_on:

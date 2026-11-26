@@ -9,7 +9,10 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 
 from core.config import SECRET_KEY, DEV_USERS, INTENT_SECRET_KEY, ADMIN_USERNAME, ADMIN_PASSWORD
+from core.tiers import decode_hash, resolve_tiers
 from middleware.bot_protection import BotProtection
+from services.tickets import publish_entry_ticket
+from services.scheduler import parse_start_time
 
 router = APIRouter()
 security = HTTPBearer(auto_error=False)
@@ -17,6 +20,7 @@ security = HTTPBearer(auto_error=False)
 class LoginRequest(BaseModel):
     student_id: str
     password: str
+    client_id: Optional[str] = "default_client"
 
 class JoinRequest(BaseModel):
     client_id: str = "default_client"
@@ -53,12 +57,39 @@ def is_safe_return_url(return_url: str, allowed_origins_str: Optional[str]) -> b
         return False
 
 @router.post("/login")
-async def pre_warm_login(request: LoginRequest):
-    if not verify_credentials(request.student_id, request.password):
+async def pre_warm_login(login_req: LoginRequest, request: Request):
+    if not verify_credentials(login_req.student_id, login_req.password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
+    client_id = login_req.client_id or "default_client"
+    redis = request.app.state.redis
+    raw_cfg = await redis.hgetall(f"config:{client_id}")
+    cfg = decode_hash(raw_cfg)
+    tiers = resolve_tiers(client_id, cfg)
+
+    # If client subscribed to Tier 1, enforce pre-auth collection window
+    if "tier1_queue" in tiers:
+        start_time_val = cfg.get("start_time")
+        if start_time_val:
+            try:
+                start_ts = parse_start_time(start_time_val)
+                pre_auth_hours = int(cfg.get("pre_auth_window_hours", 48))
+                window_opens_ts = start_ts - (pre_auth_hours * 3600)
+                now_ts = datetime.now(timezone.utc).timestamp()
+
+                if now_ts < window_opens_ts:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Pre-authentication window is not open yet. It opens {pre_auth_hours} hours before drop start.",
+                    )
+            except HTTPException:
+                raise
+            except Exception:
+                pass
+
     payload = {
-        "sub": request.student_id,
+        "sub": login_req.student_id,
+        "client_id": client_id,
         "type": "fast_pass",
         "exp": datetime.now(timezone.utc) + timedelta(hours=48),
     }
@@ -89,31 +120,28 @@ async def join_queue(
     if not raw_config and client_id != "default_client":
         raise HTTPException(status_code=404, detail="Invalid or unregistered client_id")
 
-    client_config = {
-        k.decode("utf-8") if isinstance(k, bytes) else k: 
-        v.decode("utf-8") if isinstance(v, bytes) else v 
-        for k, v in raw_config.items()
-    }
-    
+    client_config = decode_hash(raw_config)
+    await redis.sadd("registered_clients", client_id)
+
     # 3. VALIDATE RETURN URL (Prevent Open Redirect / Ticket Theft)
-    return_to = body.return_to or "http://localhost:8001/checkout"
+    return_to = body.return_to or client_config.get("redirect_url") or "http://localhost:8001/checkout"
     allowed_origins = client_config.get("allowed_origins")
     if not is_safe_return_url(return_to, allowed_origins):
         raise HTTPException(status_code=400, detail="Invalid or unauthorized return_to URL")
 
-    use_tier2 = client_config.get("tier2_waf") == "true"
-    use_tier3 = client_config.get("tier3_lottery") == "true"
+    tiers = resolve_tiers(client_id, client_config)
+    if not tiers:
+        raise HTTPException(status_code=403, detail="Client has no active subscription tiers.")
 
     # 4. TIER 2: RUN ANTI-BOT WAF (If Subscribed)
-    if use_tier2:
+    if "tier2_waf" in tiers:
         bot_guard = BotProtection(redis_client=redis, max_requests=5, window_seconds=10)
-        await bot_guard.verify_request(request)
+        await bot_guard.verify_request(request, client_id=client_id)
 
     # 5. TIER 3: JWT INTENT & LOTTERY (If Subscribed)
-    lane = "auth_queue"
     event_id = None
-    
-    if use_tier3:
+
+    if "tier3_lottery" in tiers:
         if not x_intent_token:
             raise HTTPException(status_code=401, detail="Missing Pre-Cart Intent Token.")
         
@@ -140,11 +168,16 @@ async def join_queue(
         except jwt.PyJWTError:
             raise HTTPException(status_code=403, detail="Forged Token.")
 
-        # Check Lottery vs Live Queue
-        is_live = await redis.get(f"event_active:{event_id}")
+        # Check Lottery vs Live Queue (client drop status)
+        is_live = await redis.get(f"event_active:{client_id}")
+        if is_live != "true" and event_id:
+            is_live = await redis.get(f"event_active:{event_id}")
+
         if is_live != "true":
             lane = "holding_pool"
-            await redis.sadd(f"lottery_pool:{event_id}", session_id)
+            await redis.sadd(f"lottery_pool:{client_id}", session_id)
+            if event_id and event_id != client_id:
+                await redis.sadd(f"lottery_pool:{event_id}", session_id)
             
             session_data = {
                 "client_id": client_id,
@@ -158,40 +191,65 @@ async def join_queue(
             return {
                 "session_id": session_id,
                 "lane": "holding_pool",
+                "access": "holding_pool",
                 "initial_position": "Pending Lottery",
                 "event_id": event_id,
                 "client_id": client_id,
                 "validated_return_to": return_to,
-                "tier": "enterprise"
+                "tiers": tiers,
             }
-    
-    # 6. FAST PASS CHECK
-    if credentials:
-        try:
-            payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=["HS256"])
-            if payload.get("type") == "fast_pass":
-                lane = "fast_lane"
-        except jwt.PyJWTError:
-            pass
 
-    # 7. RECORD SESSION & PUSH TO QUEUE
+    # 6. TIER 1: WAITING ROOM. Fast pass is part of this queue, not a separate product.
+    if "tier1_queue" in tiers:
+        lane = "auth_queue"
+        if credentials:
+            try:
+                payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=["HS256"])
+                if payload.get("type") == "fast_pass":
+                    token_client = payload.get("client_id")
+                    # Tenant isolation: fast pass from Client A cannot be used on Client B
+                    if not token_client or token_client == client_id:
+                        lane = "fast_lane"
+            except jwt.PyJWTError:
+                pass
+
+        session_data = {
+            "client_id": client_id,
+            "lane": lane,
+            "event_id": event_id or "",
+            "return_to": return_to,
+        }
+        await redis.hset(f"session:{session_id}", mapping=session_data)
+        await redis.expire(f"session:{session_id}", 3600)
+        position = await redis.rpush(f"queue:{client_id}:{lane}", session_id)
+        return {
+            "session_id": session_id,
+            "lane": lane,
+            "access": "queue",
+            "initial_position": position,
+            "client_id": client_id,
+            "validated_return_to": return_to,
+            "tiers": tiers,
+        }
+
+    # 7. SUBSCRIPTION WITHOUT THE WAITING ROOM. Shield and/or a live lottery already ran.
     session_data = {
         "client_id": client_id,
-        "lane": lane,
+        "lane": "direct",
         "event_id": event_id or "",
-        "return_to": return_to
+        "return_to": return_to,
     }
     await redis.hset(f"session:{session_id}", mapping=session_data)
     await redis.expire(f"session:{session_id}", 3600)
-
-    position = await redis.rpush(lane, session_id)
+    entry_ticket = await publish_entry_ticket(redis, session_id)
     return {
         "session_id": session_id,
-        "lane": lane,
-        "initial_position": position,
+        "lane": "direct",
+        "access": "direct",
+        "entry_ticket": entry_ticket,
         "client_id": client_id,
         "validated_return_to": return_to,
-        "tier": "enterprise" if use_tier3 else "basic"
+        "tiers": tiers,
     }
 
 @router.post("/admin/login")
