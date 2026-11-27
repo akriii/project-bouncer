@@ -1,11 +1,15 @@
+import secrets
 from typing import List
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, Request, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
 
-from core.config import SECRET_KEY
-from core.tiers import decode_hash, resolve_tiers
-from routers.waiting_room import manager
+from core.config import SECRET_KEY, ADMIN_USERNAME, ADMIN_PASSWORD
+from core.redis_utils import decode_hash
+from core.tiers import resolve_tiers
+from core.schemas import AdminLoginRequest
+from services.connection_manager import manager
 from services.shuffle import execute_grand_shuffle
 
 router = APIRouter(prefix="/admin")
@@ -40,6 +44,22 @@ async def get_all_client_ids(redis) -> List[str]:
             pass
 
     return sorted(list(client_ids))
+
+
+@router.post("/login")
+async def admin_login(request: AdminLoginRequest):
+    valid_user = secrets.compare_digest(request.username, ADMIN_USERNAME)
+    valid_pass = secrets.compare_digest(request.password, ADMIN_PASSWORD)
+    
+    if not (valid_user and valid_pass):
+        raise HTTPException(status_code=401, detail="Invalid admin credentials")
+    
+    payload = {
+        "sub": request.username,
+        "type": "admin",
+        "exp": datetime.now(timezone.utc) + timedelta(hours=2),
+    }
+    return {"access_token": jwt.encode(payload, SECRET_KEY, algorithm="HS256")}
 
 
 @router.get("/metrics", dependencies=[Depends(require_admin)])

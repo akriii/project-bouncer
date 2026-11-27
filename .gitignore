@@ -2,8 +2,9 @@
 # Environments & Secrets (CRITICAL)
 # ==========================================
 .env
-.env.
-.env
+.env.*
+.env*.local
+!.env.example
 .pem
 .key
 
@@ -75,3 +76,6 @@ Thumbs.db
 *.sw?
 
 .specstory/**
+
+#prevent committing current progress md file
+current-progress.md

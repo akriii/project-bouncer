@@ -4,31 +4,16 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Request, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
-from pydantic import BaseModel, Field
 
 from core.config import SECRET_KEY, VALID_LANES
-from core.tiers import decode_hash, resolve_tiers, TIER_FLAGS
+from core.redis_utils import decode_hash
+from core.tiers import resolve_tiers, TIER_FLAGS
+from core.schemas import ClientLoginRequest, ClientConfigUpdateRequest
 from services.shuffle import execute_grand_shuffle
 from services.scheduler import compute_drop_stage
 
 router = APIRouter(prefix="/client")
 security = HTTPBearer()
-
-
-class ClientLoginRequest(BaseModel):
-    client_id: str
-    secret_key: str
-
-
-class ClientConfigUpdateRequest(BaseModel):
-    redirect_url: Optional[str] = None
-    allowed_origins: Optional[str] = None
-    start_time: Optional[str] = None
-    auto_start: Optional[bool] = None
-    process_rate: Optional[float] = None
-    pre_auth_window_hours: Optional[int] = Field(
-        None, ge=1, le=120, description="Pre-auth collection window in hours before drop start (1-120 hrs, max 5 days)"
-    )
 
 
 async def require_client(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:

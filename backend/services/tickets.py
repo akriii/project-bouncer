@@ -3,7 +3,7 @@ import time
 import jwt
 
 from core.config import SECRET_KEY
-from core.tiers import decode_hash
+from core.redis_utils import decode_hash
 
 
 async def publish_entry_ticket(redis_client, session_id: str) -> str:
