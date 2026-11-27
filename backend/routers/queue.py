@@ -1,38 +1,20 @@
 import uuid
-import secrets
-from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import urlparse
-import jwt
 from fastapi import APIRouter, Depends, Request, HTTPException, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
+import jwt
 
-from core.config import SECRET_KEY, DEV_USERS, INTENT_SECRET_KEY, ADMIN_USERNAME, ADMIN_PASSWORD
-from core.tiers import decode_hash, resolve_tiers
+from core.config import SECRET_KEY, INTENT_SECRET_KEY
+from core.redis_utils import decode_hash
+from core.tiers import resolve_tiers
+from core.schemas import JoinRequest
 from middleware.bot_protection import BotProtection
 from services.tickets import publish_entry_ticket
-from services.scheduler import parse_start_time
 
 router = APIRouter()
 security = HTTPBearer(auto_error=False)
 
-class LoginRequest(BaseModel):
-    student_id: str
-    password: str
-    client_id: Optional[str] = "default_client"
-
-class JoinRequest(BaseModel):
-    client_id: str = "default_client"
-    return_to: Optional[str] = None
-
-class AdminLoginRequest(BaseModel):
-    username: str
-    password: str
-
-def verify_credentials(student_id: str, password: str) -> bool:
-    expected = DEV_USERS.get(student_id)
-    return expected is not None and secrets.compare_digest(expected, password)
 
 def is_safe_return_url(return_url: str, allowed_origins_str: Optional[str]) -> bool:
     try:
@@ -56,44 +38,6 @@ def is_safe_return_url(return_url: str, allowed_origins_str: Optional[str]) -> b
     except Exception:
         return False
 
-@router.post("/login")
-async def pre_warm_login(login_req: LoginRequest, request: Request):
-    if not verify_credentials(login_req.student_id, login_req.password):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    
-    client_id = login_req.client_id or "default_client"
-    redis = request.app.state.redis
-    raw_cfg = await redis.hgetall(f"config:{client_id}")
-    cfg = decode_hash(raw_cfg)
-    tiers = resolve_tiers(client_id, cfg)
-
-    # If client subscribed to Tier 1, enforce pre-auth collection window
-    if "tier1_queue" in tiers:
-        start_time_val = cfg.get("start_time")
-        if start_time_val:
-            try:
-                start_ts = parse_start_time(start_time_val)
-                pre_auth_hours = int(cfg.get("pre_auth_window_hours", 48))
-                window_opens_ts = start_ts - (pre_auth_hours * 3600)
-                now_ts = datetime.now(timezone.utc).timestamp()
-
-                if now_ts < window_opens_ts:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Pre-authentication window is not open yet. It opens {pre_auth_hours} hours before drop start.",
-                    )
-            except HTTPException:
-                raise
-            except Exception:
-                pass
-
-    payload = {
-        "sub": login_req.student_id,
-        "client_id": client_id,
-        "type": "fast_pass",
-        "exp": datetime.now(timezone.utc) + timedelta(hours=48),
-    }
-    return {"access_token": jwt.encode(payload, SECRET_KEY, algorithm="HS256")}
 
 @router.post("/join")
 async def join_queue(
@@ -251,18 +195,3 @@ async def join_queue(
         "validated_return_to": return_to,
         "tiers": tiers,
     }
-
-@router.post("/admin/login")
-async def admin_login(request: AdminLoginRequest):
-    valid_user = secrets.compare_digest(request.username, ADMIN_USERNAME)
-    valid_pass = secrets.compare_digest(request.password, ADMIN_PASSWORD)
-    
-    if not (valid_user and valid_pass):
-        raise HTTPException(status_code=401, detail="Invalid admin credentials")
-    
-    payload = {
-        "sub": request.username,
-        "type": "admin",
-        "exp": datetime.now(timezone.utc) + timedelta(hours=2),
-    }
-    return {"access_token": jwt.encode(payload, SECRET_KEY, algorithm="HS256")}

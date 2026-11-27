@@ -2,7 +2,7 @@ import asyncio
 import logging
 from typing import Optional
 from datetime import datetime, timezone
-from core.tiers import decode_hash
+from core.redis_utils import decode_hash
 from services.shuffle import execute_grand_shuffle
 
 logger = logging.getLogger("uvicorn.error")

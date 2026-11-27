@@ -1,16 +1,6 @@
 TIER_FLAGS = ("tier1_queue", "tier2_waf", "tier3_lottery")
 
 
-def decode_hash(raw) -> dict:
-    if not isinstance(raw, dict):
-        return {}
-    decoded = {}
-    for key, value in raw.items():
-        field = key.decode("utf-8") if isinstance(key, bytes) else key
-        decoded[field] = value.decode("utf-8") if isinstance(value, bytes) else value
-    return decoded
-
-
 def resolve_tiers(client_id: str, client_config: dict) -> list[str]:
     """Return the tier flags this client actually subscribed to.
 

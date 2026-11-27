@@ -7,7 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from core.config import REDIS_URL
 from services.worker import run_multi_tenant_dispatcher
 from services.scheduler import run_auto_start_scheduler
-from routers import auth, waiting_room, admin, client
+from services.connection_manager import manager
+from routers import shopper_auth, queue, waiting_room, admin, client
 
 
 @asynccontextmanager
@@ -26,11 +27,11 @@ async def lifespan(app: FastAPI):
         raise RuntimeError("Could not connect to Redis after multiple attempts.")
 
     # Wire shared Redis connection to WebSocket manager
-    waiting_room.manager.set_redis(app.state.redis)
+    manager.set_redis(app.state.redis)
 
     dispatcher_task = asyncio.create_task(run_multi_tenant_dispatcher(app.state.redis))
     scheduler_task = asyncio.create_task(run_auto_start_scheduler(app.state.redis))
-    listener_task = asyncio.create_task(waiting_room.manager.listen_to_redis())
+    listener_task = asyncio.create_task(manager.listen_to_redis())
 
     yield
 
@@ -53,7 +54,8 @@ app.add_middleware(
 )
 
 # Connect all the separated routing files to the main app
-app.include_router(auth.router)
+app.include_router(shopper_auth.router)
+app.include_router(queue.router)
 app.include_router(waiting_room.router)
 app.include_router(admin.router)
 app.include_router(client.router)

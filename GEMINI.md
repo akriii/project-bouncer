@@ -4,6 +4,7 @@
 - **Planning:** Always outline a step-by-step plan before making any file modifications.
 - **Verification:** Run tests and check compiler errors after every file edit. Do not mark tasks as complete until tests pass.
 - **Context Depth:** Read dependent files before altering function signatures.
+- **Current Progress:** Make sure that every current execution and plan is always recorded in current-progress.md file no matter whether its new, initial or updated. Refer to the current-progress.md file for more rules.
 
 # Project Bouncer: AI Context & Blueprint
 
@@ -44,9 +45,5 @@ Bouncer operates as a true multi-tenant platform.
 *   [x] **Phase 3:** Tier 3 Holding Pool, Grand Shuffle API, and Multi-tenant routing.
 *   **Status:** Backend is 100% feature-complete and locally tested via Docker.
 
-## Next Immediate Steps
-*   **Phase 4:** Continue on the existing React + Vite app in `frontend/` (do not initialize a new frontend repository). Next UI work: client dashboard and marketing landing page, the `useBouncer` React SDK, and the God Mode split-screen demo (Phases 5–7).
-*   **Phase 5:** Build the Client Dashboard (managing keys, event toggles, and metrics) and the Marketing Landing Page.
-*   **Phase 6:** Build the `useBouncer` React SDK for easy client integration.
-*   **Phase 7:** Set up the "God Mode" split-screen demo to showcase the real-time shuffle to prospective clients.
+
 

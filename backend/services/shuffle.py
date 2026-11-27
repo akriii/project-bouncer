@@ -3,7 +3,8 @@ import random
 import logging
 from typing import Optional
 
-from core.tiers import decode_hash, resolve_tiers
+from core.redis_utils import decode_hash
+from core.tiers import resolve_tiers
 from services.tickets import publish_entry_ticket
 
 logger = logging.getLogger("uvicorn.error")

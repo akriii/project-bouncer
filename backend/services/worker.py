@@ -1,37 +1,11 @@
 import asyncio
 import json
 import logging
-from core.tiers import decode_hash, resolve_tiers
+from core.redis_utils import decode_hash
+from core.tiers import resolve_tiers
 from services.tickets import publish_entry_ticket
 
 logger = logging.getLogger("uvicorn.error")
-
-
-async def process_queue(redis_client, queue_name: str, process_rate: float):
-    """Legacy single-queue worker retained for backward compatibility."""
-    print(f"WORKER STARTED for {queue_name} at {process_rate}/sec", flush=True)
-    sleep_time = 1.0 / process_rate if process_rate > 0 else 1.0
-
-    while True:
-        try:
-            next_user = await redis_client.lpop(queue_name)
-
-            if next_user:
-                session_id = next_user.decode("utf-8") if isinstance(next_user, bytes) else next_user
-                print(f"✅ WORKER POPPED USER: {session_id}", flush=True)
-                await publish_entry_ticket(redis_client, session_id)
-
-                progress_broadcast = json.dumps({
-                    "type": "queue_progress",
-                    "lane": queue_name,
-                    "cleared_count": 1,
-                })
-                await redis_client.publish("bouncer_channel", progress_broadcast)
-
-        except Exception as e:
-            print(f"WORKER ERROR: {str(e)}", flush=True)
-
-        await asyncio.sleep(sleep_time)
 
 
 async def run_multi_tenant_dispatcher(redis_client):
